@@ -1,0 +1,11 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Only the emails in this list can read or change the bar data.
+    // Replace the example email with the email you sign in with. Add more emails separated by commas.
+    match /bars/{bar}/{document=**} {
+      allow read, write: if request.auth != null
+        && request.auth.token.email in ['YOUR-EMAIL@example.com'];
+    }
+  }
+}

@@ -1,0 +1,4 @@
+# Never upload your bar data to GitHub (the repository is public)
+gojo-data.json
+gojo-backup-*.json
+*.xlsx
