@@ -3,11 +3,13 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { initializeFirestore, getFirestore, persistentLocalCache, persistentMultipleTabManager, doc, collection, onSnapshot, setDoc, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { firebaseConfig, BAR_ID } from "./firebase-config.js";
+import { firebaseConfig, BAR_ID, ADMIN_EMAILS } from "./firebase-config.js";
 
 const ST = { cfg: null, sales: {}, issues: {}, cash: {}, ready: { cfg: false, sales: false, issues: false, cash: false }, pending: {} };
 const UI = { tab: "sales", edit: null, stockOpen: null, moneyAll: false, moneyEdit: null, givenAll: false };
 let fdb = null, auth = null, user = null, unsubs = [];
+const isAdmin = () => !!(user && (ADMIN_EMAILS || []).map(e => e.toLowerCase()).includes(String(user.email || "").toLowerCase()));
+const ADMIN_ONLY = "Only the admin can delete or change this.";
 
 /* ---------- helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -78,10 +80,13 @@ function draft() {
 function cashBook() {
   const C = cashDays(), D = days(), o = (ST.cfg && ST.cfg.cashOpen) || { date: (ST.cfg && ST.cfg.start) || today(), balance: 0 };
   const keys = Object.keys(C).concat(Object.keys(D)).sort(); let end = today(); if (keys.length && keys[keys.length - 1] > end) end = keys[keys.length - 1];
+  const stock = {}; // deliveries marked "paid from bar money" reduce the balance automatically
+  for (const e of issues()) if (e.pay && +e.cost) { const s = stock[e.d] = stock[e.d] || { amt: 0, list: [] }; s.amt += +e.cost; s.list.push(`${e.item === "Draft - Single" ? "Draft" : e.item} ${nf(e.qty, 2)} (${nf(e.cost)})`); }
+  for (const d in stock) if (d > end) end = d;
   const rows = []; let bal = +o.balance || 0; rows.push({ d: o.date, sales: 0, other: 0, paid: 0, bal, remark: "Opening balance", open: true });
   for (let d = addDays(o.date, 1); d <= end; d = addDays(d, 1)) {
-    const c = C[d] || {}, s = dayValue(D[d]), oth = +c.other || 0, paid = +c.paid || 0; bal += s + oth - paid;
-    rows.push({ d, sales: s, other: oth, paid, bal, remark: c.remark || "", otherNote: c.otherNote || "", has: !!(C[d] || D[d]) });
+    const c = C[d] || {}, s = dayValue(D[d]), oth = +c.other || 0, manual = +c.paid || 0, st = stock[d] || { amt: 0, list: [] }, paid = manual + st.amt; bal += s + oth - paid;
+    rows.push({ d, sales: s, other: oth, paid, manual, stockPaid: st.amt, stockList: st.list.join(", "), bal, remark: c.remark || "", otherNote: c.otherNote || "", has: !!(C[d] || D[d] || stock[d]) });
   }
   return rows;
 }
@@ -90,7 +95,7 @@ function cashBook() {
 function ref(path) { return doc(fdb, "bars", BAR_ID, ...path.split("/")); }
 function write(path, data) {
   return setDoc(ref(path), clone(data)).catch(e => {
-    if (e && e.code === "permission-denied") toast("Not allowed. Check the email in the Firestore rules.");
+    if (e && e.code === "permission-denied") toast(ADMIN_ONLY);
     else toast("Not saved: " + (e && e.message ? e.message : "unknown error"));
   });
 }
@@ -191,6 +196,7 @@ function viewGiven() {
     <div class="two"><label>Quantity (<span id="g_unit">${esc(items()[0] ? items()[0].base : "")}</span>)<input inputmode="decimal" id="g_q"></label>
     <label>Cost paid (Birr)<input inputmode="decimal" id="g_c"></label></div>
     <label>Note<input id="g_n" placeholder="Optional"></label>
+    <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="g_pay" checked style="width:auto"> Paid from bar money (the cost is taken off the Money balance)</label>
     <button class="btn" data-act="addgiven">Add</button></div><h3>History</h3><div class="panel">`;
   if (!I.length) h += `<div class="empty">Nothing given yet. Add the first delivery above.</div>`;
   let last = "";
@@ -198,8 +204,8 @@ function viewGiven() {
     if (e.d !== last) { h += `<div class="row" style="background:var(--tint)"><b>${fmtDate(e.d, true)}</b></div>`; last = e.d; }
     const it = items().find(i => i.name === e.item), unit = it ? (it.name === "Draft - Single" ? "bermil" : String(it.base).toLowerCase()) : "";
     h += `<div class="row"><div class="grow"><div class="name">${esc(e.item === "Draft - Single" ? "Draft" : e.item)}</div>${e.note ? `<div class="sub">${esc(e.note)}</div>` : ""}</div>
-      <div class="num">${nf(e.qty, 2)} ${esc(unit)}${e.cost ? `<div class="sub">${nf(e.cost)} Birr</div>` : ""}</div>
-      <button class="iconbtn" data-act="delgiven" data-id="${e.id}" data-m="${e.month}" aria-label="Delete">Delete</button></div>`;
+      <div class="num">${nf(e.qty, 2)} ${esc(unit)}${e.cost ? `<div class="sub">${nf(e.cost)} Birr${e.pay ? ", from money" : ""}</div>` : ""}</div>
+      ${isAdmin() ? `<button class="iconbtn" data-act="delgiven" data-id="${e.id}" data-m="${e.month}" aria-label="Delete">Delete</button>` : ""}</div>`;
   }
   h += `</div>`; if (!UI.givenAll && I.length > 40) h += `<button class="linkish" data-act="givenall">Show all ${I.length}</button>`;
   return h;
@@ -211,7 +217,8 @@ function viewMoney() {
   const diff = (num(bc.bank) != null && bookAt != null) ? (num(bc.bank) + (num(bc.cash) || 0) - bookAt) : null;
   let h = `<h2>Money</h2><div class="panel"><div class="kegwrap"><div class="kegtext"><div class="sub">CBE balance on the book, ${fmtDate(lastRow.d)}</div><div class="big">${nf(lastRow.bal)}</div><div class="sub">Birr</div></div></div></div>
    <h3>Add money paid out</h3><div class="panel form"><div class="two"><label>Date<input type="date" id="p_d" value="${t}"></label>
-     <label>Amount (Birr)<input inputmode="decimal" id="p_a"></label></div><label>What for<input id="p_n" placeholder="For example: 1 bermil draft"></label>
+     <label>Amount (Birr)<input inputmode="decimal" id="p_a"></label></div><label>What for<input id="p_n" placeholder="For example: salary, rent, repair"></label>
+     <div class="sub">Stock you buy for the bar goes in <b>Given</b> with its cost. It is taken off the money automatically, so don’t add it here too.</div>
      <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="p_in" style="width:auto"> This is money in, not sales</label>
      <button class="btn" data-act="addpay">Add</button></div>
    <h3>Bank check</h3><div class="panel form"><div class="two"><label>Date<input type="date" id="b_d" value="${esc(bc.date)}"></label>
@@ -219,14 +226,14 @@ function viewMoney() {
      <label>Cash in hand<input inputmode="decimal" id="b_c" value="${esc(bc.cash == null ? "" : bc.cash)}"></label>
      <div class="row" style="padding:4px 0"><div class="grow">Book balance that day</div><div class="num">${bookAt == null ? "" : nf(bookAt)}</div></div>
      <div class="row" style="padding:4px 0"><div class="grow"><b>Difference</b></div><div class="num ${diff == null ? "" : diff < 0 ? "diff-neg" : "diff-pos"}">${diff == null ? "" : nf(diff) + " Birr"}</div></div>
-     <button class="btn secondary" data-act="savebank">Save check</button></div><h3>Day by day</h3><div class="panel">`;
+     ${isAdmin() ? '<button class="btn secondary" data-act="savebank">Save check</button>' : '<div class="sub">Only the admin can save the bank check.</div>'}</div><h3>Day by day</h3><div class="panel">`;
   const list = rows.filter(r => r.has || r.open).reverse(), show = UI.moneyAll ? list : list.slice(0, 30);
   for (const r of show) {
     h += `<div class="row" data-act="editmoney" data-d="${r.d}" style="cursor:pointer"><div class="grow"><div class="name">${fmtDate(r.d, true)}</div>
-      <div class="sub">${r.open ? "Opening balance" : `Sales ${nf(r.sales)}${r.other ? ", in " + nf(r.other) : ""}${r.paid ? ", paid " + nf(r.paid) : ""}`}${r.remark && !r.open ? `<br>${esc(r.remark)}` : ""}${r.otherNote ? `<br>${esc(r.otherNote)}` : ""}</div></div><div class="num">${nf(r.bal)}</div></div>`;
+      <div class="sub">${r.open ? "Opening balance" : `Sales ${nf(r.sales)}${r.other ? ", in " + nf(r.other) : ""}${r.paid ? ", paid " + nf(r.paid) : ""}`}${r.stockList ? `<br>Stock: ${esc(r.stockList)}` : ""}${r.remark && !r.open ? `<br>${esc(r.remark)}` : ""}${r.otherNote ? `<br>${esc(r.otherNote)}` : ""}</div></div><div class="num">${nf(r.bal)}</div></div>`;
     if (UI.moneyEdit === r.d && !r.open) {
       const c = cashDays()[r.d] || {};
-      h += `<div class="form" style="border-top:1px solid var(--line)"><div class="two"><label>Paid out<input inputmode="decimal" id="e_p" value="${esc(c.paid == null ? "" : c.paid)}"></label>
+      h += `<div class="form" style="border-top:1px solid var(--line)">${r.stockPaid ? `<div class="sub">Stock paid this day from Given: ${nf(r.stockPaid)} Birr (change it in Given).</div>` : ""}<div class="two"><label>Other paid out<input inputmode="decimal" id="e_p" value="${esc(c.paid == null ? "" : c.paid)}"></label>
        <label>Money in, not sales<input inputmode="decimal" id="e_o" value="${esc(c.other == null ? "" : c.other)}"></label></div>
        <label>What for<input id="e_r" value="${esc(c.remark || "")}"></label><label>Money in note<input id="e_on" value="${esc(c.otherNote || "")}"></label>
        <button class="btn" data-act="savemoney" data-d="${r.d}">Save</button></div>`;
@@ -237,19 +244,20 @@ function viewMoney() {
 }
 
 function viewSetup() {
-  let h = `<h2>Prices and re-order levels</h2><p class="sub">A new price applies to days you save from now on. Days already saved keep their old price.</p><div class="panel">`;
+  const ad = isAdmin(), dis = ad ? "" : " disabled";
+  let h = `<h2>Prices and re-order levels</h2><p class="sub">${ad ? "A new price applies to days you save from now on. Days already saved keep their old price." : "Only the admin can change prices and re-order levels."}</p><div class="panel">`;
   for (const it of items()) {
     const isD = it.name === "Draft - Single", unit = isD ? "bermil" : String(it.base).toLowerCase();
     h += `<div class="row"><div class="grow"><div class="name">${esc(short(it.name))}</div><div class="sub">Price per ${esc(String(it.su).toLowerCase())}, re-order at (${esc(unit)})</div></div>
-      <input inputmode="decimal" data-price="${esc(it.name)}" value="${esc(it.price)}" style="width:80px" aria-label="Price ${esc(it.name)}">
-      ${it.name === "Draft - Jambo" ? '<span style="width:64px"></span>' : `<input inputmode="decimal" data-reorder="${esc(it.name)}" value="${esc(it.reorder)}" style="width:64px" aria-label="Re-order level ${esc(it.name)}">`}</div>`;
+      <input inputmode="decimal" data-price="${esc(it.name)}" value="${esc(it.price)}" style="width:80px" aria-label="Price ${esc(it.name)}"${dis}>
+      ${it.name === "Draft - Jambo" ? '<span style="width:64px"></span>' : `<input inputmode="decimal" data-reorder="${esc(it.name)}" value="${esc(it.reorder)}" style="width:64px" aria-label="Re-order level ${esc(it.name)}"${dis}>`}</div>`;
   }
-  h += `</div><button class="btn" data-act="saveitems">Save prices</button>
+  h += `</div>${ad ? '<button class="btn" data-act="saveitems">Save prices</button>' : ""}
     <h3>Backup</h3><div class="panel form">
       <button class="btn secondary" data-act="exportxlsx">Export to Excel</button>
       <button class="btn secondary" data-act="exportjson">Download full backup</button>
       <div class="sub">Do a backup at the end of each month and keep the file safe.</div></div>
-    <h3>Account</h3><div class="panel form"><div class="sub">Signed in as ${esc(user ? user.email : "")}</div>
+    <h3>Account</h3><div class="panel form"><div class="sub">Signed in as ${esc(user ? user.email : "")}${ad ? " (admin)" : ""}</div>
       <button class="btn secondary" data-act="signout">Sign out</button></div>`;
   return h;
 }
@@ -333,13 +341,14 @@ document.addEventListener("click", async ev => {
     if (!confirm(`Save a correction of ${nf(d, 2)} for ${b.dataset.n}?`)) return;
     addIssue({ d: today(), item: b.dataset.n, qty: d, note: "Count correction" }); UI.stockOpen = null; toast("Count saved"); render(true); return;
   }
-  if (a === "quickkeg") { const last = issues().filter(e => e.item === "Draft - Single" && e.cost).pop(); addIssue({ d: today(), item: "Draft - Single", qty: 1, cost: last ? last.cost : undefined }); toast("1 bermil added"); render(true); return; }
+  if (a === "quickkeg") { const last = issues().filter(e => e.item === "Draft - Single" && e.cost).pop(); addIssue({ d: today(), item: "Draft - Single", qty: 1, cost: last ? last.cost : undefined, pay: last ? true : undefined }); toast(last ? "1 bermil added. " + nf(last.cost) + " Birr taken off Money." : "1 bermil added"); render(true); return; }
   if (a === "addgiven") {
     const q = num($("#g_q").value); if (q == null) { toast("Type the quantity."); return; }
     const e = { d: $("#g_d").value || today(), item: $("#g_item").value, qty: q }; const c = num($("#g_c").value); if (c != null) e.cost = c; const n = $("#g_n").value.trim(); if (n) e.note = n;
-    addIssue(e); toast("Added"); render(true); return;
+    if (c && $("#g_pay").checked) e.pay = true;
+    addIssue(e); toast(e.pay ? "Added. " + nf(c) + " Birr taken off Money." : "Added"); render(true); return;
   }
-  if (a === "delgiven") { if (!confirm("Delete this entry?")) return; const m = b.dataset.m, d = clone(ST.issues[m]); delete d.items[b.dataset.id]; ST.issues[m] = d; write("issues/" + m, d); toast("Deleted"); render(true); return; }
+  if (a === "delgiven") { if (!isAdmin()) { toast(ADMIN_ONLY); return; } if (!confirm("Delete this entry?")) return; const m = b.dataset.m, d = clone(ST.issues[m]); delete d.items[b.dataset.id]; ST.issues[m] = d; write("issues/" + m, d); toast("Deleted"); render(true); return; }
   if (a === "givenall") { UI.givenAll = true; render(true); return; }
   if (a === "moneyall") { UI.moneyAll = true; render(true); return; }
   if (a === "editmoney") { UI.moneyEdit = UI.moneyEdit === b.dataset.d ? null : b.dataset.d; render(true); return; }
@@ -353,11 +362,13 @@ document.addEventListener("click", async ev => {
   if (a === "savemoney") {
     const d = b.dataset.d, k = mk(d), dc = clone(ST.cash[k]); dc.days = dc.days || {}; const e = {};
     const p = num($("#e_p").value), o = num($("#e_o").value), r = $("#e_r").value.trim(), on = $("#e_on").value.trim();
-    if (p) e.paid = p; if (o) e.other = o; if (r) e.remark = r; if (on) e.otherNote = on; if (Object.keys(e).length) dc.days[d] = e; else delete dc.days[d];
+    if (p) e.paid = p; if (o) e.other = o; if (r) e.remark = r; if (on) e.otherNote = on;
+    if (!Object.keys(e).length && !isAdmin()) { toast(ADMIN_ONLY); return; }
+    if (Object.keys(e).length) dc.days[d] = e; else delete dc.days[d];
     ST.cash[k] = dc; UI.moneyEdit = null; write("cash/" + k, dc); toast("Saved"); render(true); return;
   }
-  if (a === "savebank") { const cfg = clone(ST.cfg); cfg.bankCheck = { date: $("#b_d").value || today(), bank: num($("#b_b").value), cash: num($("#b_c").value) }; ST.cfg = cfg; write("config/main", cfg); toast("Check saved"); render(true); return; }
-  if (a === "saveitems") {
+  if (a === "savebank") { if (!isAdmin()) { toast(ADMIN_ONLY); return; } const cfg = clone(ST.cfg); cfg.bankCheck = { date: $("#b_d").value || today(), bank: num($("#b_b").value), cash: num($("#b_c").value) }; ST.cfg = cfg; write("config/main", cfg); toast("Check saved"); render(true); return; }
+  if (a === "saveitems") { if (!isAdmin()) { toast(ADMIN_ONLY); return; }
     const cfg = clone(ST.cfg);
     for (const it of cfg.items) {
       const p = document.querySelector(`[data-price="${CSS.escape(it.name)}"]`), r = document.querySelector(`[data-reorder="${CSS.escape(it.name)}"]`);
@@ -378,7 +389,7 @@ function saveDay() {
   for (const n in e.q) { const v = num(e.q[n]); if (v) q[n] = v; }
   const cbe = num(e.cbe), cash = num(e.cash), prev = dc.days[e.date];
   const p = Object.assign(Object.fromEntries(items().map(i => [i.name, +i.price || 0])), prev && prev.p ? prev.p : {});
-  if (!Object.keys(q).length && cbe == null && cash == null) delete dc.days[e.date];
+  if (!Object.keys(q).length && cbe == null && cash == null) { if (prev && !isAdmin()) { toast(ADMIN_ONLY); return; } delete dc.days[e.date]; }
   else { const d = { q, p }; if (cbe != null) d.cbe = cbe; if (cash != null) d.cash = cash; dc.days[e.date] = d; }
   ST.sales[k] = dc; write("sales/" + k, dc);
   e.dirty = false; e.day = dc.days[e.date] || null; render(true);
