@@ -9,3 +9,5 @@ export const firebaseConfig = {
 };
 // Name of your bar in the database. Keep it as it is.
 export const BAR_ID = "gojo";
+// Admin: the only person who can delete entries and change prices.
+export const ADMIN_EMAILS = ["tewele.brhane@gmail.com"];

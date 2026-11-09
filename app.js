@@ -3,7 +3,10 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { initializeFirestore, getFirestore, persistentLocalCache, persistentMultipleTabManager, doc, collection, onSnapshot, setDoc, writeBatch } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { firebaseConfig, BAR_ID, ADMIN_EMAILS } from "./firebase-config.js";
+import * as CFG from "./firebase-config.js";
+// Read the settings this way so an older firebase-config.js without ADMIN_EMAILS still works.
+const firebaseConfig = CFG.firebaseConfig, BAR_ID = CFG.BAR_ID || "gojo";
+const ADMIN_EMAILS = CFG.ADMIN_EMAILS || ["tewele.brhane@gmail.com"];
 
 const ST = { cfg: null, sales: {}, issues: {}, cash: {}, ready: { cfg: false, sales: false, issues: false, cash: false }, pending: {} };
 const UI = { tab: "sales", edit: null, stockOpen: null, moneyAll: false, moneyEdit: null, givenAll: false };
