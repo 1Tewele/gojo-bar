@@ -260,6 +260,9 @@ function viewSetup() {
       <button class="btn secondary" data-act="exportxlsx">Export to Excel</button>
       <button class="btn secondary" data-act="exportjson">Download full backup</button>
       <div class="sub">Do a backup at the end of each month and keep the file safe.</div></div>
+    ${ad ? `<h3>Replace all data (admin)</h3><div class="panel form">
+      <div class="sub">Erases everything in the app and loads a data file instead (for example the file made from your Excel). Download a backup first.</div>
+      <input type="file" id="replacefile" accept=".json,application/json"><div class="err" id="r_err"></div></div>` : ""}
     <h3>Account</h3><div class="panel form"><div class="sub">Signed in as ${esc(user ? user.email : "")}${ad ? " (admin)" : ""}</div>
       <button class="btn secondary" data-act="signout">Sign out</button></div>`;
   return h;
@@ -324,6 +327,7 @@ document.addEventListener("change", async ev => {
   if (t.id === "saledate" && t.value) { if (UI.edit && UI.edit.dirty && !confirm("Leave without saving this day?")) { t.value = UI.edit.date; return; } loadEdit(t.value); render(true); }
   if (t.id === "g_item") { const it = items().find(i => i.name === t.value); $("#g_unit").textContent = it ? (it.name === "Draft - Single" ? "bermil" : it.base) : ""; }
   if (t.id === "importfile" && t.files && t.files[0]) await importData(t.files[0]);
+  if (t.id === "replacefile" && t.files && t.files[0]) { await replaceData(t.files[0]); t.value = ""; }
 });
 document.addEventListener("keydown", ev => { if (ev.key === "Enter" && (ev.target.id === "l_p" || ev.target.id === "l_e")) doLogin(); });
 document.addEventListener("click", async ev => {
@@ -423,6 +427,25 @@ async function exportXlsx() {
   X.utils.book_append_sheet(wb, X.utils.aoa_to_sheet(mo), "Money");
   const out = X.write(wb, { bookType: "xlsx", type: "array" });
   download(`gojo-bar-${today()}.xlsx`, new Blob([out], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+}
+async function replaceData(file) {
+  const err = $("#r_err");
+  if (!isAdmin()) { toast(ADMIN_ONLY); return; }
+  try {
+    const data = JSON.parse(await file.text());
+    if (!data.config || !data.config.items) { err.textContent = "This is not a Gojo Bar data file."; return; }
+    if (!confirm("Erase ALL data in the app and load this file instead?")) return;
+    if (!confirm("Are you sure? Everything typed in the app will be replaced.")) return;
+    const b = writeBatch(fdb);
+    b.set(ref("config/main"), data.config);
+    for (const col of ["sales", "issues", "cash"]) {
+      const incoming = data[col] || {};
+      for (const k in ST[col]) if (!(k in incoming)) b.delete(ref(col + "/" + k));
+      for (const k in incoming) b.set(ref(col + "/" + k), incoming[k]);
+    }
+    err.textContent = "Replacing…"; await b.commit();
+    UI.edit = null; err.textContent = ""; toast("Data replaced"); location.hash = "#money";
+  } catch (e) { err.textContent = "Could not replace: " + (e.message || e); }
 }
 async function importData(file) {
   const err = $("#i_err");
